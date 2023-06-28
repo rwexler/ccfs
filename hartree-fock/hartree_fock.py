@@ -1,6 +1,10 @@
-""" Hartree-Fock method for solving the Schrödinger equation for H2"""
+"""
+Hartree-Fock method for solving the Schrödinger equation for H2
+Based on Szabo and Ostlund, Modern Quantum Chemistry
+"""
 
 import numpy as np
+from matplotlib import pyplot as plt
 from scipy.special import erf
 
 from basis_sets import phi_1s_CFG
@@ -61,6 +65,18 @@ def V_uv_C(a, b, R_A, R_B, R_C, Z_C):
     return normalization(a, b) * integral
 
 
+def calculate_V(phi_GF, R_A, Z_A, N, STO_NG):
+    V = np.zeros((N, N))
+    for A in range(R_A.shape[0]):
+        for u in range(N):
+            for v in range(N):
+                for p in range(STO_NG):
+                    for q in range(STO_NG):
+                        V[u, v] += phi_GF[u]["d"][p] * phi_GF[v]["d"][q] * V_uv_C(phi_GF[u]["a"][p], phi_GF[v]["a"][q],
+                                                                                  R_A[u], R_A[v], R_A[A], Z_A[A])
+    return V
+
+
 def calculate_X(S, orthogonalization_procedure):
     s, U = np.linalg.eigh(S)
     if orthogonalization_procedure == "symmetric":
@@ -106,42 +122,7 @@ def calculate_G(phi_GF, P, R_A, N, STO_NG):
     return G
 
 
-def main(orthogonalization_procedure="symmetric"):
-    # Specify molecule
-    R_A = np.array([[0, 0, 0], [1.4, 0, 0]])
-    Z_A = np.array([1, 1])
-    N = 2
-
-    # Specify basis set
-    z = 1.24
-    STO_NG = 3
-    phi_GF = [phi_1s_CFG["z"][z]["STO-NG"][STO_NG] for _ in range(N)]
-
-    # Guess at the density matrix (P)
-    P = np.zeros((N, N))
-
-    # Calculate overlap matrix (S)
-    S = calculate_S(phi_GF, R_A, N, STO_NG)
-
-    # Calculate T
-    T = calculate_T(phi_GF, R_A, N, STO_NG)
-
-    # Calculate V
-    V = np.zeros((N, N))
-    for A in range(R_A.shape[0]):
-        for u in range(N):
-            for v in range(N):
-                for p in range(STO_NG):
-                    for q in range(STO_NG):
-                        V[u, v] += phi_GF[u]["d"][p] * phi_GF[v]["d"][q] * V_uv_C(phi_GF[u]["a"][p], phi_GF[v]["a"][q],
-                                                                                  R_A[u], R_A[v], R_A[A], Z_A[A])
-
-    # Calculate H_core
-    H_core = T + V
-
-    # Diagonalize S and obtain transformation matrix (X)
-    X = calculate_X(S, orthogonalization_procedure)
-
+def single_point_calculation(phi_GF, P, R_A, N, STO_NG, H_core, X):
     # Calculate G
     G = calculate_G(phi_GF, P, R_A, N, STO_NG)
 
@@ -153,9 +134,103 @@ def main(orthogonalization_procedure="symmetric"):
 
     # Diagonalize F_prime to obtain C_prime and epsilon
     epsilon, C_prime = np.linalg.eigh(F_prime)
-    print(epsilon)
-    print(C_prime)
+
+    # Calculate C = X @ C_prime
+    C = X @ C_prime
+    return C, epsilon, F
+
+
+def calculate_P(C, N):
+    P = np.zeros((N, N))
+    for u in range(N):
+        for v in range(N):
+            for a in range(int(N / 2)):
+                P[u, v] += 2 * C[u, a] * C[v, a]
+    return P
+
+
+def SCF(phi_GF, R_A, Z_A, N, STO_NG, N_iter, orthogonalization_procedure, verbose=False):
+    # Calculate overlap matrix (S)
+    S = calculate_S(phi_GF, R_A, N, STO_NG)
+
+    # Calculate T
+    T = calculate_T(phi_GF, R_A, N, STO_NG)
+
+    # Calculate V
+    V = calculate_V(phi_GF, R_A, Z_A, N, STO_NG)
+
+    # Calculate H_core
+    H_core = T + V
+
+    # Diagonalize S and obtain transformation matrix (X)
+    X = calculate_X(S, orthogonalization_procedure)
+
+    # Guess at the density matrix (P)
+    P = np.zeros((N, N))
+
+    # SCF loop
+    dP = 1e-5
+    for i in range(N_iter):
+        C, epsilon, F = single_point_calculation(phi_GF, P, R_A, N, STO_NG, H_core, X)
+
+        # Form a new P
+        P_old = P.copy()
+        P = calculate_P(C, N)
+
+        # Calculate the difference between the new and old P
+        P_diff = np.linalg.norm(P - P_old)
+        if P_diff < dP:
+            if verbose:
+                print("SCF converged after {} iterations".format(i + 1))
+            break
+
+    # Calculate total electronic energy
+    E_0 = 1 / 2 * np.sum(P * (H_core + F))
+
+    # Calculate nuclear repulsion energy
+    E_nuc = Z_A[0] * Z_A[1] / np.linalg.norm(R_A[0] - R_A[1])
+
+    # Calculate total energy
+    E_tot = E_0 + E_nuc
+
+    return C, epsilon, E_0, E_tot
+
+
+def main():
+    # Calculate potential energy surface
+    Rs = np.linspace(0.5, 5, 91)
+    E_H2 = np.zeros(len(Rs))
+    for i, R in enumerate(Rs):
+        print("Calculating H2 at R = {} bohr".format(R))
+
+        # Specify molecule
+        R_A = np.array([[0, 0, 0], [R, 0, 0]])
+        Z_A = np.array([1, 1])
+        N = 2
+
+        # Specify basis set
+        z = 1.24
+        STO_NG = 3
+        phi_GF = [phi_1s_CFG["z"][z]["STO-NG"][STO_NG] for _ in range(N)]
+
+        # Calculation parameters
+        N_iter = 5
+        orthogonalization_procedure = "symmetric"
+
+        # Run SCF calculation
+        C, epsilon, E_0, E_tot = SCF(phi_GF, R_A, Z_A, N, STO_NG, N_iter, orthogonalization_procedure, verbose=False)
+
+        # Store energy
+        E_H2[i] = E_tot
+
+    # Plot potential energy surface
+    E_H = -0.4666
+    plt.plot(Rs, E_H2 - 2 * E_H)
+    plt.xlabel("R (bohr)")
+    plt.ylabel(r"$E({\rm H_2})-2E({\rm H})$ (hartree)")
+    plt.tight_layout()
+    plt.savefig("H2.png")
 
 
 if __name__ == "__main__":
-    main(orthogonalization_procedure="symmetric")
+    main()
